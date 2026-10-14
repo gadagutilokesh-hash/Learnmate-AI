@@ -1,0 +1,14 @@
+{
+  "name": "learnmate-ai",
+  "version": "1.0.0",
+  "description": "LearnMate AI Multimodal Personalized Tutoring Platform",
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "dev:backend": "powershell -Command \"cd backend; .\\venv\\Scripts\\python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload\"",
+    "build": "npm --prefix frontend run build",
+    "lint": "npm --prefix frontend run lint",
+    "test:backend": "powershell -Command \".\\backend\\venv\\Scripts\\python -m pytest backend/tests\"",
+    "benchmark": "powershell -Command \".\\backend\\venv\\Scripts\\python backend/run_benchmark.py --dry-run\""
+  }
+}

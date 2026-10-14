@@ -1,11 +1,29 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Sidebar } from "@/components/Sidebar";
 import { Header } from "@/components/Header";
+import { Footer } from "@/components/Footer";
 
 export const metadata: Metadata = {
-  title: "LearnMate AI — Multimodal Study Companion & Adaptive Tutor",
-  description: "Source-grounded multimodal AI tutoring, adaptive assessments, and deterministic Bayesian mastery tracking for Multimodal Hackathon 2026 Track D.",
+  title: {
+    default: "LearnMate AI: Source-Grounded Study Platform",
+    template: "%s | LearnMate AI"
+  },
+  description:
+    "Source-grounded academic tutoring, adaptive assessments, and deterministic Bayesian mastery tracking over verified course materials.",
+  icons: {
+    icon: [
+      { url: "/icon.svg", type: "image/svg+xml" },
+      { url: "/favicon.svg", type: "image/svg+xml" }
+    ],
+    apple: "/icon.svg"
+  }
+};
+
+export const viewport: Viewport = {
+  themeColor: "#080808",
+  width: "device-width",
+  initialScale: 1
 };
 
 export default function RootLayout({
@@ -15,13 +33,14 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className="dark h-full antialiased">
-      <body className="min-h-full flex bg-slate-950 text-slate-100 overflow-x-hidden">
+      <body className="min-h-full flex flex-col md:flex-row bg-[#080808] text-[#F5F5F5] overflow-x-hidden">
         <Sidebar />
         <div className="flex-1 flex flex-col min-w-0 min-h-screen">
           <Header />
-          <main className="flex-1 p-6 md:p-8 max-w-7xl w-full mx-auto">
+          <main className="flex-1 p-4 sm:p-6 md:p-8 max-w-7xl w-full mx-auto" id="main-content">
             {children}
           </main>
+          <Footer />
         </div>
       </body>
     </html>

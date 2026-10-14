@@ -32,7 +32,7 @@ class VideoParser:
 
         # Multimodal Gemini Direct Processing or Simulated Lecture Transcriber
         try:
-            if gemini_service.is_configured():
+            if gemini_service.is_gemini_configured():
                 chunks, duration_seconds = self._transcribe_with_gemini(file_path, default_topic)
                 if chunks:
                     return chunks, duration_seconds

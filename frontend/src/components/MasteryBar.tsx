@@ -13,51 +13,53 @@ export function MasteryBar({ topic }: MasteryBarProps) {
   const getStatusBadge = () => {
     if (topic.mastery_score >= 0.75) {
       return (
-        <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+        <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-[#22C55E]/10 text-[#22C55E] border border-[#22C55E]/20">
           Mastered
         </span>
       );
     }
     if (topic.mastery_score >= 0.45) {
       return (
-        <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
+        <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-[#F59E0B]/10 text-[#F59E0B] border border-[#F59E0B]/20">
           In Progress
         </span>
       );
     }
     return (
-      <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/20">
+      <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-[#EF4444]/10 text-[#EF4444] border border-[#EF4444]/20">
         Needs Practice
       </span>
     );
   };
 
   const getBarColor = () => {
-    if (topic.mastery_score >= 0.75) return "bg-emerald-500";
-    if (topic.mastery_score >= 0.45) return "bg-amber-500";
-    return "bg-rose-500";
+    if (topic.mastery_score >= 0.75) return "bg-[#22C55E]";
+    if (topic.mastery_score >= 0.45) return "bg-[#F59E0B]";
+    return "bg-[#EF4444]";
   };
 
   return (
-    <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 hover:border-slate-700 transition-colors">
+    <div className="p-3.5 rounded-md bg-[#121212] border border-[#262626] hover:border-[#363636] transition-colors">
       <div className="flex items-center justify-between gap-2 mb-2">
-        <span className="text-sm font-medium text-slate-200 truncate">{topic.topic_name}</span>
+        <span className="text-xs md:text-sm font-medium text-[#F5F5F5] truncate">{topic.topic_name}</span>
         <div className="flex items-center gap-2 shrink-0">
           {getStatusBadge()}
-          <span className="text-xs font-mono font-semibold text-slate-300">{percentage}%</span>
+          <span className="text-xs font-mono font-medium text-[#F5F5F5]">{percentage}%</span>
         </div>
       </div>
 
-      <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+      <div
+        role="progressbar"
+        aria-label={`${topic.topic_name} mastery`}
+        aria-valuenow={percentage}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        className="w-full h-1.5 rounded bg-[#181818] overflow-hidden"
+      >
         <div
-          className={`h-full rounded-full transition-all duration-500 ${getBarColor()}`}
-          style={{ width: `${Math.max(5, percentage)}%` }}
+          className={`h-full rounded transition-all duration-300 ${getBarColor()}`}
+          style={{ width: `${percentage}%` }}
         />
-      </div>
-
-      <div className="flex items-center justify-between text-[11px] text-slate-500 mt-2 font-mono">
-        <span>Attempts: {topic.attempts_count}</span>
-        <span>Accuracy: {topic.attempts_count > 0 ? Math.round((topic.correct_count / topic.attempts_count) * 100) : 0}%</span>
       </div>
     </div>
   );

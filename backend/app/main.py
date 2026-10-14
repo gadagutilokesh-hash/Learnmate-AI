@@ -3,9 +3,10 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.routers import health, courses, ingestion, tutor, assessment, learner, evaluation
+from app.routers import health, auth, courses, ingestion, tutor, assessment, learner, evaluation
 from app.db.storage import storage
 from app.core.gemini import gemini_service
+from app.core.auth import hash_password
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,6 +18,30 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.core.ai_provider import get_ai_provider
+    try:
+        provider = get_ai_provider()
+        logger.info(
+            f"Active AI Provider: '{provider.provider_name}' | Model: '{provider.model_name}' | "
+            f"Configured: {provider.is_configured()}"
+        )
+    except Exception as e:
+        logger.error(f"Startup AI provider configuration error: {e}")
+
+    # Bootstrap initial admin if not yet created
+    try:
+        if settings.ADMIN_EMAIL and settings.ADMIN_INITIAL_PASSWORD:
+            admin_pwd_hash = hash_password(settings.ADMIN_INITIAL_PASSWORD)
+            admin_id = storage.bootstrap_admin_user(
+                email=settings.ADMIN_EMAIL,
+                password_hash=admin_pwd_hash,
+                full_name="System Administrator"
+            )
+            if admin_id:
+                logger.info(f"Initial administrator account bootstrapped successfully: {settings.ADMIN_EMAIL}")
+    except Exception as e:
+        logger.error(f"Admin bootstrap error: {e}")
+
     startup_seed_demo_data()
     yield
 
@@ -28,16 +53,30 @@ app = FastAPI(
 )
 
 # CORS configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # For hackathon local and preview flexibility
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# In production, restrict strictly to configured production origins; never allow wildcard "*"
+cors_origins = settings.CORS_ORIGINS if settings.CORS_ORIGINS else ["http://localhost:3000", "http://127.0.0.1:3000"]
+if settings.ENVIRONMENT.lower() == "production":
+    logger.info(f"Production CORS strictly restricted to origins: {cors_origins}")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+    )
+else:
+    # Development mode: permit local frontend and preview origins
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # Include API Routers
 app.include_router(health.router, prefix="/api")
+app.include_router(auth.router, prefix="/api")
 app.include_router(courses.router, prefix="/api")
 app.include_router(ingestion.router, prefix="/api")
 app.include_router(tutor.router, prefix="/api")

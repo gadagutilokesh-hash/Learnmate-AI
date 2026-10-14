@@ -71,11 +71,15 @@ class PDFParser:
                     images = page.get_images(full=True)
                     for img_index, img_info in enumerate(images[:2]):  # Limit to 2 per page to balance throughput
                         xref = img_info[0]
-                        base_image = doc.extract_image(xref)
-                        image_bytes = base_image.get("image")
-                        image_ext = base_image.get("ext", "png")
-                        width = base_image.get("width", 0)
-                        height = base_image.get("height", 0)
+                        try:
+                            base_image = doc.extract_image(xref)
+                            image_bytes = base_image.get("image")
+                            image_ext = base_image.get("ext", "png")
+                            width = base_image.get("width", 0)
+                            height = base_image.get("height", 0)
+                        except Exception as e_extract:
+                            logger.debug(f"Image extraction skipped on page {page_number} xref {xref}: {e_extract}")
+                            continue
 
                         # Only analyze diagrams of significant size
                         if width > 150 and height > 150 and image_bytes:
@@ -93,7 +97,8 @@ class PDFParser:
                                 metadata={"width": width, "height": height, "format": image_ext}
                             ))
                 except Exception as e_img:
-                    logger.debug(f"Image extraction skipped on page {page_number}: {e_img}")
+                    logger.error(f"Multimodal processing error on page {page_number}: {e_img}")
+                    raise e_img
 
             doc.close()
 
