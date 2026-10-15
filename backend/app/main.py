@@ -16,8 +16,61 @@ logger = logging.getLogger("LearnMateAI")
 
 from contextlib import asynccontextmanager
 
+def validate_storage_configuration(cfg=None):
+    """
+    Validates storage configuration at application startup.
+    In a serverless production environment (such as Vercel), local SQLite database files and
+    local upload directories are ephemeral (/tmp) and cannot be shared across serverless function instances.
+    Persistent learner accounts, courses, embeddings, and assessments require persistent storage.
+    """
+    s = cfg or settings
+    if s.is_production:
+        if s.is_serverless or not s.has_persistent_storage:
+            if not s.ALLOW_EPHEMERAL_STORAGE:
+                error_msg = (
+                    "Production startup aborted: Required persistent storage is not configured.\n"
+                    "LearnMate AI currently uses SQLite and local file storage. "
+                    "In a serverless production environment (such as Vercel), local files and SQLite databases "
+                    "are ephemeral (/tmp) and cannot be shared across serverless function instances.\n"
+                    "User accounts, courses, embeddings, assessments, and uploaded documents will not persist.\n"
+                    "Action required:\n"
+                    "  1. Configure a persistent external database (set SUPABASE_URL and SUPABASE_KEY, or DATABASE_URL).\n"
+                    "  2. Configure cloud object storage (e.g., AWS S3, Supabase Storage, Cloudflare R2) for uploads.\n"
+                    "  3. To bypass this check strictly for temporary preview or testing on Vercel, set the environment variable:\n"
+                    "     ALLOW_EPHEMERAL_STORAGE=true\n"
+                )
+                logger.critical(error_msg)
+                raise RuntimeError(error_msg)
+            else:
+                logger.warning(
+                    "⚠️ RUNNING WITH EPHEMERAL STORAGE IN PRODUCTION/SERVERLESS: "
+                    "ALLOW_EPHEMERAL_STORAGE=true is active. SQLite database (%s) and uploads (%s) "
+                    "are stored in temporary storage (/tmp). Data WILL NOT persist across serverless instances, "
+                    "cold starts, or new deployments. Do not use this for real learner accounts or production persistence.",
+                    s.DATA_DIR,
+                    s.UPLOADS_DIR
+                )
+    else:
+        logger.info(
+            f"Storage mode: {s.storage_mode} | Environment: {s.ENVIRONMENT} | "
+            f"Data dir: {s.DATA_DIR} | Uploads dir: {s.UPLOADS_DIR}"
+        )
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 1. Validate storage configuration
+    validate_storage_configuration()
+
+    # 2. Ensure storage directories exist at runtime for local/ephemeral execution
+    from app.core.config import ensure_storage_dirs
+    try:
+        ensure_storage_dirs()
+    except Exception as e:
+        logger.error(f"Failed to ensure storage directories: {e}")
+        if settings.is_production and not settings.ALLOW_EPHEMERAL_STORAGE:
+            raise
+
+    # 3. Startup AI Provider Check
     from app.core.ai_provider import get_ai_provider
     try:
         provider = get_ai_provider()
@@ -28,7 +81,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Startup AI provider configuration error: {e}")
 
-    # Bootstrap initial admin if not yet created
+    # 4. Bootstrap initial admin if not yet created
     try:
         if settings.ADMIN_EMAIL and settings.ADMIN_INITIAL_PASSWORD:
             admin_pwd_hash = hash_password(settings.ADMIN_INITIAL_PASSWORD)
@@ -42,7 +95,11 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Admin bootstrap error: {e}")
 
-    startup_seed_demo_data()
+    try:
+        startup_seed_demo_data()
+    except Exception as e:
+        logger.error(f"Startup demo data seeding error: {e}")
+
     yield
 
 app = FastAPI(
@@ -53,13 +110,21 @@ app = FastAPI(
 )
 
 # CORS configuration
-# In production, restrict strictly to configured production origins; never allow wildcard "*"
-cors_origins = settings.CORS_ORIGINS if settings.CORS_ORIGINS else ["http://localhost:3000", "http://127.0.0.1:3000"]
+# Explicitly ensure frontend production origin is always permitted
+cors_origins = list(settings.CORS_ORIGINS) if settings.CORS_ORIGINS else [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://learnmate-ai-peach.vercel.app"
+]
+if "https://learnmate-ai-peach.vercel.app" not in cors_origins:
+    cors_origins.append("https://learnmate-ai-peach.vercel.app")
+
 if settings.ENVIRONMENT.lower() == "production":
     logger.info(f"Production CORS strictly restricted to origins: {cors_origins}")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
+        allow_origin_regex=r"https:\/\/learnmate-ai.*\.vercel\.app",
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["*"],
@@ -68,7 +133,7 @@ else:
     # Development mode: permit local frontend and preview origins
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"],
+        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "https://learnmate-ai-peach.vercel.app", "*"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -84,6 +149,11 @@ app.include_router(assessment.router, prefix="/api")
 app.include_router(learner.router, prefix="/api")
 app.include_router(evaluation.router, prefix="/api")
 
+@app.get("/health")
+def root_health():
+    """Alias for /api/health to support cloud platforms requesting root /health."""
+    return health.get_health()
+
 @app.get("/")
 def root():
     return {
@@ -91,7 +161,7 @@ def root():
         "documentation": "/docs",
         "health": "/api/health",
         "gemini_ready": gemini_service.is_configured(),
-        "storage_mode": "supabase" if (settings.SUPABASE_URL and settings.SUPABASE_KEY) else "local_embedded"
+        "storage_mode": settings.storage_mode
     }
 
 def startup_seed_demo_data():

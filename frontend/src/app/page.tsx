@@ -22,30 +22,52 @@ export default function DashboardPage() {
   const [courses, setCourses] = useState<Course[]>([]);
   const [selectedCourseId, setSelectedCourseId] = useState<string>("");
   const [recentAssessments, setRecentAssessments] = useState<Assessment[]>([]);
+  const [isOnline, setIsOnline] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [showDetailedMastery, setShowDetailedMastery] = useState(false);
 
   useEffect(() => {
+    let isMounted = true;
+    api.getHealth()
+      .then(() => {
+        if (isMounted) setIsOnline(true);
+      })
+      .catch(() => {
+        if (isMounted) setIsOnline(false);
+      });
+
     async function loadData() {
       try {
-        const [profData, courseList, assessList] = await Promise.all([
+        const [profRes, courseRes, assessRes] = await Promise.allSettled([
           api.getLearnerProfile(),
           api.listCourses(),
           api.listAssessments()
         ]);
-        setProfile(profData);
-        setCourses(courseList);
-        if (courseList.length > 0) {
-          setSelectedCourseId(courseList[0].id);
+        if (!isMounted) return;
+
+        if (profRes.status === "fulfilled") {
+          setProfile(profRes.value);
         }
-        setRecentAssessments(assessList);
+        if (courseRes.status === "fulfilled") {
+          setCourses(courseRes.value);
+          if (courseRes.value.length > 0) {
+            setSelectedCourseId(courseRes.value[0].id);
+          }
+        }
+        if (assessRes.status === "fulfilled") {
+          setRecentAssessments(assessRes.value);
+        }
       } catch (e) {
         console.error("Dashboard data load error:", e);
       } finally {
-        setLoading(false);
+        if (isMounted) setLoading(false);
       }
     }
     loadData();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   if (loading) {
@@ -119,17 +141,26 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Standalone Deployment Status Banner (Visible when backend has not connected yet) */}
-      {courses.length === 0 && (
+      {/* Standalone Deployment Status Banner / Empty Courses Notice */}
+      {isOnline === false ? (
         <div className="p-3.5 rounded-md bg-[#121212] border border-[#262626] text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-[#A1A1AA]">
           <div className="flex items-center gap-2.5">
             <div className="w-2 h-2 rounded-full bg-[#F59E0B] shrink-0" aria-hidden="true" />
             <span>
-              <strong className="text-[#F5F5F5] font-medium">Standalone Frontend Deployment:</strong> Backend API is currently offline. AI tutoring, live assessments, and course ingestion will activate automatically once your FastAPI backend server is deployed and connected via <code className="text-[#3B82F6] font-mono text-[11px]">NEXT_PUBLIC_API_URL</code>.
+              <strong className="text-[#F5F5F5] font-medium">Backend Offline:</strong> Backend API is currently unreachable. AI tutoring, live assessments, and course ingestion will activate automatically once the FastAPI backend server is reachable.
             </span>
           </div>
         </div>
-      )}
+      ) : courses.length === 0 ? (
+        <div className="p-3.5 rounded-md bg-[#121212] border border-[#262626] text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-[#A1A1AA]">
+          <div className="flex items-center gap-2.5">
+            <div className="w-2 h-2 rounded-full bg-[#3B82F6] shrink-0" aria-hidden="true" />
+            <span>
+              <strong className="text-[#F5F5F5] font-medium">Welcome to LearnMate AI:</strong> Backend is connected. No courses have been indexed yet. Head to the <Link href="/courses" className="text-[#3B82F6] underline font-medium hover:text-[#60A5FA]">Workspace</Link> to create a course and upload study materials.
+            </span>
+          </div>
+        </div>
+      ) : null}
 
       {/* B. Learning Overview */}
       <section aria-labelledby="overview-heading" className="space-y-3">

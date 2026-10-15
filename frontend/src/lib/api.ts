@@ -5,14 +5,35 @@ import {
   User, AuthTokenResponse
 } from "./types";
 
-const rawBaseUrl = (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_API_URL)
-  ? process.env.NEXT_PUBLIC_API_URL.trim()
-  : "http://localhost:8000/api";
-const API_BASE_URL = rawBaseUrl.replace(/\/+$/, "");
+export const DEFAULT_PRODUCTION_API_URL = "https://learnmate-ai-backend-gvxc.onrender.com/api";
+
+export function normalizeApiBaseUrl(rawUrl?: string | null): string {
+  let clean = (rawUrl || "").trim();
+  if (!clean) {
+    clean = DEFAULT_PRODUCTION_API_URL;
+  }
+  // Remove any trailing slashes
+  clean = clean.replace(/\/+$/, "");
+
+  // If the URL does not end with /api, append /api
+  // Fixes accidental omission of /api prefix on backend host URLs
+  if (!clean.endsWith("/api")) {
+    clean = `${clean}/api`;
+  }
+
+  // Deduplicate any accidental duplicate /api/api
+  clean = clean.replace(/\/api\/api(?:\/|$)/g, "/api");
+
+  // Ensure clean trailing format
+  return clean.replace(/\/+$/, "");
+}
 
 export function getApiBaseUrl(): string {
-  return API_BASE_URL;
+  const envUrl = typeof process !== "undefined" ? process.env?.NEXT_PUBLIC_API_URL : undefined;
+  return normalizeApiBaseUrl(envUrl);
 }
+
+export const API_BASE_URL = getApiBaseUrl();
 
 export const BACKEND_OFFLINE_NOTICE =
   "LearnMate AI backend service is currently offline or unreachable. Please verify that your backend server is deployed and NEXT_PUBLIC_API_URL is configured.";
@@ -29,7 +50,7 @@ export function isNetworkError(err: unknown): boolean {
 
 export function isBackendConfigured(): boolean {
   if (typeof window === "undefined") {
-    return Boolean(process.env.NEXT_PUBLIC_API_URL && process.env.NEXT_PUBLIC_API_URL.trim() !== "");
+    return true;
   }
   const isLocalHost =
     window.location.hostname === "localhost" ||
@@ -39,7 +60,7 @@ export function isBackendConfigured(): boolean {
   if (!isLocalHost) {
     const url = getApiBaseUrl().toLowerCase();
     // On remote domain, if API_BASE_URL points to localhost or is relative, it is unconfigured
-    if (!process.env.NEXT_PUBLIC_API_URL || url.includes("localhost") || url.includes("127.0.0.1")) {
+    if (url.includes("localhost") || url.includes("127.0.0.1")) {
       return false;
     }
     if (url.startsWith("/") || url === window.location.origin.toLowerCase() + "/api") {
@@ -78,26 +99,68 @@ export function clearStoredToken(): void {
   }
 }
 
-async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
+export interface FetchJsonOptions extends RequestInit {
+  timeoutMs?: number;
+}
+
+export function parseHealthResponse(raw: unknown): HealthStatus {
+  const data = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const rawStatus = typeof data.status === "string" ? data.status.toLowerCase() : "ok";
+  const isHealthy = rawStatus === "ok" || rawStatus === "healthy" || rawStatus === "success";
+
+  return {
+    status: isHealthy ? "ok" : String(data.status || "ok"),
+    app_name: typeof data.app_name === "string" ? data.app_name : "LearnMate AI Backend",
+    gemini_configured: Boolean(data.gemini_configured),
+    active_provider: typeof data.active_provider === "string" ? data.active_provider : "gemini",
+    active_model: typeof data.active_model === "string" ? data.active_model : undefined,
+    provider_configured: Boolean(data.provider_configured ?? data.gemini_configured ?? true),
+    supabase_configured: Boolean(data.supabase_configured),
+    storage_mode: typeof data.storage_mode === "string" ? data.storage_mode : "local_embedded",
+    timestamp: typeof data.timestamp === "string" ? data.timestamp : new Date().toISOString(),
+    provider_capabilities: data.provider_capabilities as Record<string, boolean> | undefined
+  };
+}
+
+async function fetchJson<T>(url: string, options?: FetchJsonOptions): Promise<T> {
   const token = getStoredToken();
+  const method = (options?.method || "GET").toUpperCase();
+  const isBodyAllowed = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
+
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
+    ...(isBodyAllowed && options?.body ? { "Content-Type": "application/json" } : {}),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(options?.headers as Record<string, string> || {})
   };
+
+  const timeoutMs = options?.timeoutMs || 25000;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
 
   let res: Response;
   try {
     res = await fetch(url, {
       ...options,
-      credentials: "include",
+      signal: options?.signal || controller.signal,
+      credentials: options?.credentials || (token ? "include" : "same-origin"),
       headers
     });
   } catch (err: unknown) {
+    if (controller.signal.aborted) {
+      console.warn(`[LearnMate AI] Request timed out after ${timeoutMs}ms for ${url}`);
+      throw new Error(
+        `LearnMate AI backend request timed out after ${Math.round(timeoutMs / 1000)}s. The backend may be spinning up from a cold start. Please retry.`
+      );
+    }
+    console.warn(`[LearnMate AI] Fetch failed for ${url}:`, err);
     if (isNetworkError(err)) {
       throw new Error(BACKEND_OFFLINE_NOTICE);
     }
     throw err instanceof Error ? err : new Error(String(err));
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   if (!res.ok) {
@@ -108,7 +171,7 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
           "Authentication service is temporarily unavailable. The backend account endpoint was not found (HTTP 404). Please ensure your FastAPI backend is deployed and NEXT_PUBLIC_API_URL is configured.";
       } else {
         errMessage =
-          "Backend service endpoint was not found (HTTP 404). Please verify that your FastAPI backend is deployed and NEXT_PUBLIC_API_URL is configured correctly.";
+          `Backend endpoint not found at ${url} (HTTP 404). Please verify that your FastAPI backend is deployed and NEXT_PUBLIC_API_URL includes the /api prefix.`;
       }
     } else if (res.status === 502 || res.status === 503 || res.status === 504) {
       errMessage = `LearnMate AI backend is temporarily unavailable (HTTP ${res.status}). The service may be starting up or under maintenance.`;
@@ -120,6 +183,7 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
         // Ignore JSON parse failure, use fallback status text
       }
     }
+    console.warn(`[LearnMate AI] HTTP ${res.status} response from ${url}:`, errMessage);
     throw new Error(errMessage);
   }
   return res.json();
@@ -172,7 +236,10 @@ export const api = {
   getMe: (): Promise<User> => fetchJson(`${API_BASE_URL}/auth/me`),
 
   // Health
-  getHealth: (): Promise<HealthStatus> => fetchJson(`${API_BASE_URL}/health`),
+  getHealth: async (): Promise<HealthStatus> => {
+    const raw = await fetchJson<unknown>(`${API_BASE_URL}/health`, { timeoutMs: 15000 });
+    return parseHealthResponse(raw);
+  },
 
   // Courses
   listCourses: (): Promise<Course[]> => fetchJson(`${API_BASE_URL}/courses`),

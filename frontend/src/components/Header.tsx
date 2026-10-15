@@ -11,6 +11,7 @@ import {
 
 export function Header() {
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [isCheckingHealth, setIsCheckingHealth] = useState(true);
   const [courses, setCourses] = useState<Course[]>([]);
   const [activeCourseId, setActiveCourseId] = useState<string>("");
   const [user, setUser] = useState<User | null>(null);
@@ -28,13 +29,58 @@ export function Header() {
     }
   }, []);
 
+  const checkHealth = useCallback(async () => {
+    try {
+      const h = await api.getHealth();
+      setHealth(h);
+      setIsCheckingHealth(false);
+      return h;
+    } catch (err) {
+      console.warn("[Header] Backend health check failed:", err);
+      setHealth(null);
+      setIsCheckingHealth(false);
+      return null;
+    }
+  }, []);
+
+  const coursesRef = React.useRef(courses);
+  useEffect(() => {
+    coursesRef.current = courses;
+  }, [courses]);
+
   useEffect(() => {
     let isMounted = true;
-    api.getHealth()
-      .then((h) => {
-        if (isMounted) setHealth(h);
-      })
-      .catch((err) => console.warn("Backend not reached yet:", err));
+    let retryTimer: NodeJS.Timeout | null = null;
+    let pollInterval: NodeJS.Timeout | null = null;
+
+    const performInitialCheck = async () => {
+      const initialHealth = await checkHealth();
+      if (!isMounted) return;
+
+      if (!initialHealth) {
+        // First attempt failed (possible Render cold start). Schedule a quick retry in 3.5s
+        retryTimer = setTimeout(async () => {
+          if (!isMounted) return;
+          const retryHealth = await checkHealth();
+          if (retryHealth) {
+            loadCourses();
+          }
+        }, 3500);
+      }
+    };
+
+    performInitialCheck();
+
+    // Background health polling every 30s to detect server recovery / maintain connection
+    pollInterval = setInterval(() => {
+      if (isMounted) {
+        checkHealth().then((h) => {
+          if (h && coursesRef.current.length === 0) {
+            loadCourses();
+          }
+        });
+      }
+    }, 30000);
 
     api.getMe()
       .then((me) => {
@@ -57,8 +103,10 @@ export function Header() {
 
     return () => {
       isMounted = false;
+      if (retryTimer) clearTimeout(retryTimer);
+      if (pollInterval) clearInterval(pollInterval);
     };
-  }, []);
+  }, [checkHealth, loadCourses]);
 
   const handleAuthSuccess = (authenticatedUser: User) => {
     setUser(authenticatedUser);
@@ -106,7 +154,7 @@ export function Header() {
               </select>
             ) : (
               <span className="text-[#71717A] text-[11px] ml-1">
-                {health === null ? "Backend Offline" : "No courses indexed"}
+                {health === null ? (isCheckingHealth ? "Connecting..." : "Backend Offline") : "No courses indexed"}
               </span>
             )}
           </label>
@@ -118,7 +166,11 @@ export function Header() {
           <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#121212] border border-[#262626] text-[#A1A1AA]">
             <Cpu className="w-3.5 h-3.5 text-[#3B82F6]" aria-hidden="true" />
             <span className="text-[#71717A] text-[11px]">{health ? `${providerLabel}:` : "Backend:"}</span>
-            {health === null ? (
+            {isCheckingHealth && !health ? (
+              <span className="text-[#A1A1AA] flex items-center gap-1 font-medium text-[11px]">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#3B82F6] animate-pulse" /> Connecting...
+              </span>
+            ) : health === null ? (
               <span className="text-[#71717A] flex items-center gap-1 font-medium text-[11px]">
                 <AlertCircle className="w-3 h-3 text-[#F59E0B]" aria-hidden="true" /> Offline
               </span>
@@ -138,7 +190,7 @@ export function Header() {
             <Database className="w-3.5 h-3.5 text-[#71717A]" aria-hidden="true" />
             <span className="text-[#71717A] text-[11px]">Index:</span>
             <span className="text-[#F5F5F5] font-mono text-[11px]">
-              {health === null ? "Offline" : health?.storage_mode === "supabase" ? "Supabase pgvector" : "Local Vector DB"}
+              {health === null ? (isCheckingHealth ? "Connecting..." : "Offline") : health?.storage_mode === "supabase" ? "Supabase pgvector" : "Local Vector DB"}
             </span>
           </div>
 

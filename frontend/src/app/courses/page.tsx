@@ -37,6 +37,7 @@ export default function CoursesPage() {
   const [newCourseDesc, setNewCourseDesc] = useState("");
   const [showNewCourseModal, setShowNewCourseModal] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [isOnline, setIsOnline] = useState<boolean | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -54,6 +55,7 @@ export default function CoursesPage() {
     try {
       const list = await api.listCourses();
       setCourses(list);
+      setIsOnline(true);
       if (list.length > 0) {
         setSelectedCourseId((prev) => (list.some((c) => c.id === prev) ? prev : list[0].id));
       }
@@ -75,6 +77,14 @@ export default function CoursesPage() {
 
   useEffect(() => {
     let isMounted = true;
+    api.getHealth()
+      .then(() => {
+        if (isMounted) setIsOnline(true);
+      })
+      .catch(() => {
+        if (isMounted) setIsOnline(false);
+      });
+
     api.getMe()
       .then((me) => {
         if (isMounted) setUser(me);
@@ -333,9 +343,9 @@ export default function CoursesPage() {
           <div className="p-4 rounded-lg bg-[#121212] border border-[#262626] text-xs text-[#A1A1AA] flex items-center gap-3">
             <AlertCircle className="w-4 h-4 text-[#F59E0B] shrink-0" />
             <span>
-              {courses.length === 0
+              {isOnline === false
                 ? "Backend service is currently offline. Shared BEFA demo course will load once your backend server is deployed and connected."
-                : "No shared demo courses available."}
+                : "No shared demo courses available. Create a private course above to start uploading documents."}
             </span>
           </div>
         ) : (
@@ -486,15 +496,23 @@ export default function CoursesPage() {
         )}
       </div>
 
-      {/* Fallback when courses is empty (e.g. backend offline) */}
+      {/* Fallback when courses is empty */}
       {courses.length === 0 && (
         <div className="p-8 rounded-lg bg-[#121212] border border-[#262626] text-center space-y-3">
-          <div className="w-10 h-10 rounded-md bg-[#181818] border border-[#262626] flex items-center justify-center text-[#F59E0B] mx-auto">
-            <AlertCircle className="w-5 h-5" aria-hidden="true" />
+          <div className="w-10 h-10 rounded-md bg-[#181818] border border-[#262626] flex items-center justify-center text-[#3B82F6] mx-auto">
+            {isOnline === false ? (
+              <AlertCircle className="w-5 h-5 text-[#F59E0B]" aria-hidden="true" />
+            ) : (
+              <BookOpen className="w-5 h-5 text-[#3B82F6]" aria-hidden="true" />
+            )}
           </div>
-          <h3 className="text-sm font-semibold text-[#F5F5F5]">Backend Service Currently Offline</h3>
+          <h3 className="text-sm font-semibold text-[#F5F5F5]">
+            {isOnline === false ? "Backend Service Currently Offline" : "No Courses Indexed Yet"}
+          </h3>
           <p className="text-xs text-[#A1A1AA] max-w-md mx-auto leading-relaxed">
-            The frontend is running in standalone mode. Course knowledge base indexing and document ingestion will automatically activate once your FastAPI backend is running and connected via <code className="text-[#3B82F6] font-mono text-[11px]">NEXT_PUBLIC_API_URL</code>.
+            {isOnline === false
+              ? "The frontend is running in standalone mode. Course knowledge base indexing and document ingestion will automatically activate once your FastAPI backend is running and connected via NEXT_PUBLIC_API_URL."
+              : "No course materials have been uploaded yet. Click '+ Create Course' above to set up your first study workspace and start uploading lecture documents."}
           </p>
         </div>
       )}

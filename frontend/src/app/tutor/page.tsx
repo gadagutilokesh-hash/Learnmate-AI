@@ -14,7 +14,8 @@ import {
   User,
   Info,
   Clock,
-  RotateCcw
+  RotateCcw,
+  BookOpen
 } from "lucide-react";
 
 interface ChatMessage {
@@ -60,6 +61,7 @@ function getFormattedTime(): string {
 export default function TutorPage() {
   const [courses, setCourses] = useState<Course[]>([]);
   const [selectedCourseId, setSelectedCourseId] = useState<string>("");
+  const [isOnline, setIsOnline] = useState<boolean | null>(null);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([INITIAL_WELCOME_MESSAGE]);
@@ -67,13 +69,32 @@ export default function TutorPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    api.listCourses().then((cList) => {
-      setCourses(cList);
-      if (cList.length > 0) {
-        const courseWithDocs = cList.find((c) => c.documents_count > 0);
-        setSelectedCourseId(courseWithDocs ? courseWithDocs.id : cList[0].id);
-      }
-    });
+    let isMounted = true;
+    api.getHealth()
+      .then(() => {
+        if (isMounted) setIsOnline(true);
+      })
+      .catch(() => {
+        if (isMounted) setIsOnline(false);
+      });
+
+    api.listCourses()
+      .then((cList) => {
+        if (isMounted) {
+          setCourses(cList);
+          if (cList.length > 0) {
+            const courseWithDocs = cList.find((c) => c.documents_count > 0);
+            setSelectedCourseId(courseWithDocs ? courseWithDocs.id : cList[0].id);
+          }
+        }
+      })
+      .catch(() => {
+        // Course listing failure is handled gracefully
+      });
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -95,13 +116,17 @@ export default function TutorPage() {
     if (!queryText) setQuery("");
 
     if (!selectedCourseId) {
+      const isTrulyOffline = isOnline === false;
+      const noticeText = isTrulyOffline
+        ? "The LearnMate AI backend service is currently offline or unreachable. Please verify your backend server deployment."
+        : "No course materials are currently loaded. Please create a course and upload lecture notes or textbooks in the Workspace to ask questions.";
       const offlineMsg: ChatMessage = {
         id: createMessageId("err"),
         sender: "tutor",
-        text: "The LearnMate AI backend service is currently offline or unreachable. Please connect your FastAPI backend via NEXT_PUBLIC_API_URL to ask questions and receive verified citations.",
+        text: noticeText,
         isGrounded: false,
         isError: true,
-        errorType: "backend_offline",
+        errorType: isTrulyOffline ? "backend_offline" : "no_course",
         timestamp: getFormattedTime()
       };
       setMessages((prev) => [...prev, offlineMsg]);
@@ -167,9 +192,13 @@ export default function TutorPage() {
             <span className="hidden sm:inline-flex items-center gap-1 text-[11px] font-medium text-[#22C55E] px-2 py-0.5 rounded bg-[#22C55E]/10 border border-[#22C55E]/20">
               <ShieldCheck className="w-3 h-3" aria-hidden="true" /> Strict Grounding Active
             </span>
-          ) : (
+          ) : isOnline === false ? (
             <span className="hidden sm:inline-flex items-center gap-1 text-[11px] font-medium text-[#F59E0B] px-2 py-0.5 rounded bg-[#F59E0B]/10 border border-[#F59E0B]/20">
               <AlertTriangle className="w-3 h-3" aria-hidden="true" /> Backend Offline
+            </span>
+          ) : (
+            <span className="hidden sm:inline-flex items-center gap-1 text-[11px] font-medium text-[#3B82F6] px-2 py-0.5 rounded bg-[#3B82F6]/10 border border-[#3B82F6]/20">
+              <BookOpen className="w-3 h-3" aria-hidden="true" /> Awaiting Course Upload
             </span>
           )}
         </div>
@@ -196,7 +225,9 @@ export default function TutorPage() {
             </select>
           </div>
         ) : (
-          <span className="text-xs text-[#71717A] font-mono">Backend Offline</span>
+          <span className="text-xs text-[#71717A] font-mono">
+            {isOnline === false ? "Backend Offline" : "No Courses Indexed"}
+          </span>
         )}
       </div>
 
@@ -364,13 +395,18 @@ export default function TutorPage() {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Backend Offline Indicator */}
-      {courses.length === 0 && (
+      {/* Status Indicators */}
+      {isOnline === false ? (
         <div className="flex items-center gap-2 p-2.5 px-3 rounded-md bg-[#121212] border border-[#262626] text-xs text-[#A1A1AA] shrink-0">
           <div className="w-2 h-2 rounded-full bg-[#F59E0B] shrink-0" aria-hidden="true" />
           <span>Backend service offline. AI tutoring responses will activate once the backend is connected via <code className="text-[#3B82F6] font-mono text-[11px]">NEXT_PUBLIC_API_URL</code>.</span>
         </div>
-      )}
+      ) : courses.length === 0 ? (
+        <div className="flex items-center gap-2 p-2.5 px-3 rounded-md bg-[#121212] border border-[#262626] text-xs text-[#A1A1AA] shrink-0">
+          <div className="w-2 h-2 rounded-full bg-[#3B82F6] shrink-0" aria-hidden="true" />
+          <span>Backend connected. No course documents are uploaded yet. Upload lecture notes, slides, or textbooks in the Workspace to begin source-grounded tutoring.</span>
+        </div>
+      ) : null}
 
       {/* Input Box */}
       <form

@@ -25,6 +25,7 @@ import {
 export default function AssessmentsPage() {
   const [courses, setCourses] = useState<Course[]>([]);
   const [selectedCourseId, setSelectedCourseId] = useState<string>("");
+  const [isOnline, setIsOnline] = useState<boolean | null>(null);
   const [availableTopics, setAvailableTopics] = useState<string[]>([]);
   const [selectedTopic, setSelectedTopic] = useState<string>("");
   const [selectedQuestionType, setSelectedQuestionType] = useState<string>("mixed");
@@ -42,14 +43,29 @@ export default function AssessmentsPage() {
   const [submissionResult, setSubmissionResult] = useState<QuizSubmissionResult | null>(null);
   const [activeCitation, setActiveCitation] = useState<Citation | null>(null);
 
-  // Fetch courses on mount
+  // Fetch courses and check health on mount
   useEffect(() => {
+    let isMounted = true;
+    api.getHealth()
+      .then(() => {
+        if (isMounted) setIsOnline(true);
+      })
+      .catch(() => {
+        if (isMounted) setIsOnline(false);
+      });
+
     api.listCourses().then((cList) => {
-      setCourses(cList);
-      if (cList.length > 0) {
-        setSelectedCourseId(cList[0].id);
+      if (isMounted) {
+        setCourses(cList);
+        if (cList.length > 0) {
+          setSelectedCourseId(cList[0].id);
+        }
       }
-    });
+    }).catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   // Fetch topics when course changes
@@ -189,15 +205,22 @@ export default function AssessmentsPage() {
         </div>
       )}
 
-      {/* Backend Offline Notice */}
-      {courses.length === 0 && (
+      {/* Status Notice */}
+      {isOnline === false ? (
         <div className="p-3.5 rounded-md bg-[#121212] border border-[#262626] text-xs flex items-center gap-2.5 text-[#A1A1AA]">
           <div className="w-2 h-2 rounded-full bg-[#F59E0B] shrink-0" aria-hidden="true" />
           <span>
             <strong className="text-[#F5F5F5] font-medium">Backend Offline:</strong> Adaptive quiz generation and concept diagnosis require an active FastAPI backend server. Configure <code className="text-[#3B82F6] font-mono text-[11px]">NEXT_PUBLIC_API_URL</code> to connect.
           </span>
         </div>
-      )}
+      ) : courses.length === 0 ? (
+        <div className="p-3.5 rounded-md bg-[#121212] border border-[#262626] text-xs flex items-center gap-2.5 text-[#A1A1AA]">
+          <div className="w-2 h-2 rounded-full bg-[#3B82F6] shrink-0" aria-hidden="true" />
+          <span>
+            <strong className="text-[#F5F5F5] font-medium">Awaiting Course Upload:</strong> Backend service is connected. Upload course materials in the Workspace tab to generate adaptive quizzes and diagnostics.
+          </span>
+        </div>
+      ) : null}
 
       {/* Mode 1: Assessment Generator Configurator */}
       {!activeQuiz && !submissionResult && (
@@ -228,7 +251,9 @@ export default function AssessmentsPage() {
                 className="w-full px-3 py-2 rounded-md bg-[#080808] border border-[#262626] text-xs md:text-sm text-[#F5F5F5] focus:outline-none focus-visible:ring-1 focus-visible:ring-[#3B82F6] disabled:opacity-60"
               >
                 {courses.length === 0 ? (
-                  <option value="">Backend offline &bull; No courses indexed</option>
+                  <option value="">
+                    {isOnline === false ? "Backend offline \u2022 Connection required" : "No courses indexed \u2022 Upload materials to begin"}
+                  </option>
                 ) : (
                   courses.map((c) => {
                     const isDemo = c.is_demo || c.visibility === "shared_demo";
@@ -356,9 +381,13 @@ export default function AssessmentsPage() {
                 <>
                   <Clock className="w-4 h-4 animate-spin" aria-hidden="true" /> Generating Grounded Questions...
                 </>
-              ) : courses.length === 0 ? (
+              ) : isOnline === false ? (
                 <>
                   <AlertTriangle className="w-4 h-4 text-[#F59E0B]" aria-hidden="true" /> Backend Offline (Quiz Generation Unavailable)
+                </>
+              ) : courses.length === 0 ? (
+                <>
+                  <BookOpen className="w-4 h-4 text-[#71717A]" aria-hidden="true" /> Awaiting Course Upload (No Courses Found)
                 </>
               ) : (
                 <>

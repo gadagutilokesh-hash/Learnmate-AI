@@ -1,13 +1,14 @@
 export interface HealthStatus {
   status: string;
   app_name: string;
-  gemini_configured: boolean;
+  gemini_configured?: boolean;
   active_provider?: string;
   active_model?: string;
   provider_configured?: boolean;
-  supabase_configured: boolean;
-  storage_mode: string;
-  timestamp: string;
+  supabase_configured?: boolean;
+  storage_mode?: string;
+  timestamp?: string;
+  provider_capabilities?: Record<string, boolean>;
 }
 
 export interface User {
