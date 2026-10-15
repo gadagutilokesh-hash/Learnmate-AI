@@ -2,10 +2,13 @@ import os
 import json
 import sqlite3
 import uuid
+import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 import numpy as np
 from app.core.config import settings
+
+logger = logging.getLogger("LearnMateAI.Storage")
 
 class LocalStorageEngine:
     """
@@ -13,257 +16,312 @@ class LocalStorageEngine:
     Fully compatible with the Supabase schema, allowing zero-friction local execution.
     """
     def __init__(self, db_path: Optional[str] = None):
-        if db_path is None:
-            db_path = os.path.join(settings.DATA_DIR, "learnmate.db")
-        self.db_path = db_path
-        self._init_db()
+        self._custom_db_path = db_path
+        self._initialized = False
+
+    @property
+    def db_path(self) -> str:
+        if self._custom_db_path is not None:
+            return self._custom_db_path
+        return os.path.join(settings.DATA_DIR, "learnmate.db")
+
+    @db_path.setter
+    def db_path(self, val: str):
+        self._custom_db_path = val
+        self._initialized = False
+
+    @db_path.deleter
+    def db_path(self):
+        self._custom_db_path = None
+        self._initialized = False
+
+    def _ensure_dir_exists(self):
+        db_file = self.db_path
+        if not db_file or db_file == ":memory:":
+            return
+
+        dir_name = os.path.dirname(os.path.abspath(db_file))
+        if not dir_name:
+            return
+
+        try:
+            os.makedirs(dir_name, exist_ok=True)
+        except OSError as e:
+            raise RuntimeError(
+                f"Failed to create database directory '{dir_name}' for configured path '{db_file}': {e}. "
+                "Ensure directory path exists and process has write permissions. "
+                "If using a Render persistent disk, ensure the mount path matches the configured DATA_DIR."
+            ) from e
+
+        # Verify that the directory is writable
+        test_probe = os.path.join(dir_name, f".write_test_{uuid.uuid4().hex}")
+        try:
+            with open(test_probe, "w") as f:
+                f.write("probe")
+            os.remove(test_probe)
+        except OSError as e:
+            raise RuntimeError(
+                f"Database directory '{dir_name}' for configured path '{db_file}' is not writable: {e}. "
+                "Ensure write permissions are configured on the target directory or persistent disk mount path."
+            ) from e
 
     def _get_connection(self):
+        if not self._initialized:
+            self._init_db()
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
 
     def _init_db(self):
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS courses (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                description TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            """)
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS documents (
-                id TEXT PRIMARY KEY,
-                course_id TEXT NOT NULL,
-                filename TEXT NOT NULL,
-                file_type TEXT NOT NULL,
-                file_path TEXT NOT NULL,
-                ingestion_status TEXT NOT NULL DEFAULT 'pending',
-                error_message TEXT,
-                total_pages_or_slides INTEGER,
-                duration_seconds REAL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE
-            );
-            """)
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS document_chunks (
-                id TEXT PRIMARY KEY,
-                document_id TEXT NOT NULL,
-                course_id TEXT NOT NULL,
-                chunk_index INTEGER NOT NULL,
-                content TEXT NOT NULL,
-                chunk_type TEXT NOT NULL DEFAULT 'text',
-                source_type TEXT NOT NULL,
-                page_number INTEGER,
-                slide_number INTEGER,
-                start_timestamp TEXT,
-                end_timestamp TEXT,
-                topic TEXT,
-                concept TEXT,
-                embedding TEXT, -- JSON serialized vector
-                metadata TEXT,  -- JSON serialized dict
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
-            );
-            """)
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS topic_mastery (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                topic_name TEXT NOT NULL,
-                mastery_score REAL DEFAULT 0.1,
-                p_transit REAL DEFAULT 0.15,
-                p_guess REAL DEFAULT 0.20,
-                p_slip REAL DEFAULT 0.10,
-                attempts_count INTEGER DEFAULT 0,
-                correct_count INTEGER DEFAULT 0,
-                last_attempt_at TEXT NOT NULL,
-                UNIQUE(user_id, topic_name)
-            );
-            """)
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS assessments (
-                id TEXT PRIMARY KEY,
-                course_id TEXT,
-                user_id TEXT NOT NULL,
-                title TEXT NOT NULL,
-                assessment_type TEXT NOT NULL,
-                difficulty TEXT NOT NULL,
-                total_questions INTEGER NOT NULL,
-                score REAL,
-                status TEXT NOT NULL,
-                questions_json TEXT NOT NULL,
-                misconceptions_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            """)
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS evaluation_runs (
-                id TEXT PRIMARY KEY,
-                timestamp TEXT NOT NULL,
-                run_name TEXT NOT NULL,
-                dataset_type TEXT NOT NULL,
-                faithfulness REAL NOT NULL,
-                answer_relevancy REAL NOT NULL,
-                context_precision REAL NOT NULL,
-                context_recall REAL NOT NULL,
-                question_repetition_rate REAL NOT NULL,
-                grounded_accuracy REAL NOT NULL,
-                unsupported_rejection_rate REAL NOT NULL,
-                citation_precision REAL NOT NULL,
-                simulation_results_json TEXT NOT NULL,
-                sample_evaluations_json TEXT NOT NULL
-            );
-            """)
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS delivered_questions (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                assessment_id TEXT NOT NULL,
-                question_id TEXT NOT NULL,
-                fingerprint TEXT NOT NULL,
-                normalized_prompt TEXT NOT NULL,
-                topic_name TEXT,
-                delivered_at TEXT NOT NULL
-            );
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_deliv_user ON delivered_questions(user_id);")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_deliv_fingerprint ON delivered_questions(fingerprint);")
+        if self._initialized:
+            return
+        self._ensure_dir_exists()
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            with conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS courses (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                """)
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS documents (
+                    id TEXT PRIMARY KEY,
+                    course_id TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    file_type TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    ingestion_status TEXT NOT NULL DEFAULT 'pending',
+                    error_message TEXT,
+                    total_pages_or_slides INTEGER,
+                    duration_seconds REAL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE CASCADE
+                );
+                """)
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS document_chunks (
+                    id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    course_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    chunk_type TEXT NOT NULL DEFAULT 'text',
+                    source_type TEXT NOT NULL,
+                    page_number INTEGER,
+                    slide_number INTEGER,
+                    start_timestamp TEXT,
+                    end_timestamp TEXT,
+                    topic TEXT,
+                    concept TEXT,
+                    embedding TEXT, -- JSON serialized vector
+                    metadata TEXT,  -- JSON serialized dict
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+                );
+                """)
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS topic_mastery (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    topic_name TEXT NOT NULL,
+                    mastery_score REAL DEFAULT 0.1,
+                    p_transit REAL DEFAULT 0.15,
+                    p_guess REAL DEFAULT 0.20,
+                    p_slip REAL DEFAULT 0.10,
+                    attempts_count INTEGER DEFAULT 0,
+                    correct_count INTEGER DEFAULT 0,
+                    last_attempt_at TEXT NOT NULL,
+                    UNIQUE(user_id, topic_name)
+                );
+                """)
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS assessments (
+                    id TEXT PRIMARY KEY,
+                    course_id TEXT,
+                    user_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    assessment_type TEXT NOT NULL,
+                    difficulty TEXT NOT NULL,
+                    total_questions INTEGER NOT NULL,
+                    score REAL,
+                    status TEXT NOT NULL,
+                    questions_json TEXT NOT NULL,
+                    misconceptions_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                """)
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS evaluation_runs (
+                    id TEXT PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    run_name TEXT NOT NULL,
+                    dataset_type TEXT NOT NULL,
+                    faithfulness REAL NOT NULL,
+                    answer_relevancy REAL NOT NULL,
+                    context_precision REAL NOT NULL,
+                    context_recall REAL NOT NULL,
+                    question_repetition_rate REAL NOT NULL,
+                    grounded_accuracy REAL NOT NULL,
+                    unsupported_rejection_rate REAL NOT NULL,
+                    citation_precision REAL NOT NULL,
+                    simulation_results_json TEXT NOT NULL,
+                    sample_evaluations_json TEXT NOT NULL
+                );
+                """)
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS delivered_questions (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    assessment_id TEXT NOT NULL,
+                    question_id TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    normalized_prompt TEXT NOT NULL,
+                    topic_name TEXT,
+                    delivered_at TEXT NOT NULL
+                );
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_deliv_user ON delivered_questions(user_id);")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_deliv_fingerprint ON delivered_questions(fingerprint);")
 
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS assessment_answers (
-                id TEXT PRIMARY KEY,
-                assessment_id TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                question_id TEXT NOT NULL,
-                submitted_answer TEXT,
-                is_correct INTEGER NOT NULL,
-                score REAL NOT NULL,
-                grading_method TEXT,
-                feedback TEXT,
-                created_at TEXT NOT NULL,
-                UNIQUE(assessment_id, question_id)
-            );
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ans_user ON assessment_answers(user_id);")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ans_assessment ON assessment_answers(assessment_id);")
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS assessment_answers (
+                    id TEXT PRIMARY KEY,
+                    assessment_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    question_id TEXT NOT NULL,
+                    submitted_answer TEXT,
+                    is_correct INTEGER NOT NULL,
+                    score REAL NOT NULL,
+                    grading_method TEXT,
+                    feedback TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(assessment_id, question_id)
+                );
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_ans_user ON assessment_answers(user_id);")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_ans_assessment ON assessment_answers(assessment_id);")
 
-            # Gracefully ensure started_at and completed_at columns exist in assessments table
-            cursor.execute("PRAGMA table_info(assessments)")
-            existing_cols = [r[1] for r in cursor.fetchall()]
-            if "started_at" not in existing_cols:
-                cursor.execute("ALTER TABLE assessments ADD COLUMN started_at TEXT")
-            if "completed_at" not in existing_cols:
-                cursor.execute("ALTER TABLE assessments ADD COLUMN completed_at TEXT")
+                # Gracefully ensure started_at and completed_at columns exist in assessments table
+                cursor.execute("PRAGMA table_info(assessments)")
+                existing_cols = [r[1] for r in cursor.fetchall()]
+                if "started_at" not in existing_cols:
+                    cursor.execute("ALTER TABLE assessments ADD COLUMN started_at TEXT")
+                if "completed_at" not in existing_cols:
+                    cursor.execute("ALTER TABLE assessments ADD COLUMN completed_at TEXT")
 
-            # Phase 4: Mastery History Audit Table
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS mastery_history (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                topic_name TEXT NOT NULL,
-                assessment_id TEXT,
-                mastery_score REAL NOT NULL,
-                previous_score REAL NOT NULL,
-                is_correct INTEGER,
-                score_delta REAL NOT NULL,
-                observed_score REAL,
-                p_transit REAL NOT NULL,
-                p_guess REAL NOT NULL,
-                p_slip REAL NOT NULL,
-                recorded_at TEXT NOT NULL
-            );
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_hist_user_topic ON mastery_history(user_id, topic_name);")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_hist_user_time ON mastery_history(user_id, recorded_at);")
+                # Phase 4: Mastery History Audit Table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS mastery_history (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    topic_name TEXT NOT NULL,
+                    assessment_id TEXT,
+                    mastery_score REAL NOT NULL,
+                    previous_score REAL NOT NULL,
+                    is_correct INTEGER,
+                    score_delta REAL NOT NULL,
+                    observed_score REAL,
+                    p_transit REAL NOT NULL,
+                    p_guess REAL NOT NULL,
+                    p_slip REAL NOT NULL,
+                    recorded_at TEXT NOT NULL
+                );
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_hist_user_topic ON mastery_history(user_id, topic_name);")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_hist_user_time ON mastery_history(user_id, recorded_at);")
 
-            # Phase 4: Topic Prerequisites Knowledge Graph
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS topic_prerequisites (
-                id TEXT PRIMARY KEY,
-                course_id TEXT,
-                topic_name TEXT NOT NULL,
-                prerequisite_topic TEXT NOT NULL,
-                UNIQUE(course_id, topic_name, prerequisite_topic)
-            );
-            """)
+                # Phase 4: Topic Prerequisites Knowledge Graph
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS topic_prerequisites (
+                    id TEXT PRIMARY KEY,
+                    course_id TEXT,
+                    topic_name TEXT NOT NULL,
+                    prerequisite_topic TEXT NOT NULL,
+                    UNIQUE(course_id, topic_name, prerequisite_topic)
+                );
+                """)
 
-            # Gracefully ensure spaced repetition columns exist in topic_mastery table
-            cursor.execute("PRAGMA table_info(topic_mastery)")
-            existing_tm_cols = [r[1] for r in cursor.fetchall()]
-            if "next_review_at" not in existing_tm_cols:
-                cursor.execute("ALTER TABLE topic_mastery ADD COLUMN next_review_at TEXT")
-            if "review_interval_days" not in existing_tm_cols:
-                cursor.execute("ALTER TABLE topic_mastery ADD COLUMN review_interval_days REAL DEFAULT 1.0")
-            if "consecutive_correct" not in existing_tm_cols:
-                cursor.execute("ALTER TABLE topic_mastery ADD COLUMN consecutive_correct INTEGER DEFAULT 0")
-            if "repetition_count" not in existing_tm_cols:
-                cursor.execute("ALTER TABLE topic_mastery ADD COLUMN repetition_count INTEGER DEFAULT 0")
+                # Gracefully ensure spaced repetition columns exist in topic_mastery table
+                cursor.execute("PRAGMA table_info(topic_mastery)")
+                existing_tm_cols = [r[1] for r in cursor.fetchall()]
+                if "next_review_at" not in existing_tm_cols:
+                    cursor.execute("ALTER TABLE topic_mastery ADD COLUMN next_review_at TEXT")
+                if "review_interval_days" not in existing_tm_cols:
+                    cursor.execute("ALTER TABLE topic_mastery ADD COLUMN review_interval_days REAL DEFAULT 1.0")
+                if "consecutive_correct" not in existing_tm_cols:
+                    cursor.execute("ALTER TABLE topic_mastery ADD COLUMN consecutive_correct INTEGER DEFAULT 0")
+                if "repetition_count" not in existing_tm_cols:
+                    cursor.execute("ALTER TABLE topic_mastery ADD COLUMN repetition_count INTEGER DEFAULT 0")
 
-            # Phase 3: User Accounts Schema
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY,
-                email TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                full_name TEXT,
-                role TEXT NOT NULL DEFAULT 'user',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);")
+                # Phase 3: User Accounts Schema
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    email TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    full_name TEXT,
+                    role TEXT NOT NULL DEFAULT 'user',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);")
 
-            # Phase 2 & 4: Course Ownership and Visibility Schema Migration
-            cursor.execute("PRAGMA table_info(courses)")
-            existing_course_cols = [r[1] for r in cursor.fetchall()]
-            if "owner_id" not in existing_course_cols:
-                cursor.execute("ALTER TABLE courses ADD COLUMN owner_id TEXT")
-            if "visibility" not in existing_course_cols:
-                cursor.execute("ALTER TABLE courses ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
-            if "is_demo" not in existing_course_cols:
-                cursor.execute("ALTER TABLE courses ADD COLUMN is_demo INTEGER NOT NULL DEFAULT 0")
+                # Phase 2 & 4: Course Ownership and Visibility Schema Migration
+                cursor.execute("PRAGMA table_info(courses)")
+                existing_course_cols = [r[1] for r in cursor.fetchall()]
+                if "owner_id" not in existing_course_cols:
+                    cursor.execute("ALTER TABLE courses ADD COLUMN owner_id TEXT")
+                if "visibility" not in existing_course_cols:
+                    cursor.execute("ALTER TABLE courses ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
+                if "is_demo" not in existing_course_cols:
+                    cursor.execute("ALTER TABLE courses ADD COLUMN is_demo INTEGER NOT NULL DEFAULT 0")
 
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_courses_owner ON courses(owner_id);")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_courses_visibility ON courses(visibility);")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_courses_owner ON courses(owner_id);")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_courses_visibility ON courses(visibility);")
 
-            # Designated shared demo courses:
-            # Preserves all existing notes, embeddings, chunks, and citations!
-            cursor.execute("""
-                UPDATE courses 
-                SET visibility = 'shared_demo', is_demo = 1, title = 'BEFA (Shared Demo)'
-                WHERE id = '562df001-4a84-4593-86b5-8815cf2f5170' OR LOWER(title) = 'befa'
-            """)
-            cursor.execute("""
-                UPDATE courses 
-                SET visibility = 'shared_demo', is_demo = 1
-                WHERE id = 'cd781c49-8d52-4a53-835f-a0e003bec7cf' OR LOWER(title) LIKE '%cs229%'
-            """)
+                # Designated shared demo courses:
+                # Preserves all existing notes, embeddings, chunks, and citations!
+                cursor.execute("""
+                    UPDATE courses 
+                    SET visibility = 'shared_demo', is_demo = 1, title = 'BEFA (Shared Demo)'
+                    WHERE id = '562df001-4a84-4593-86b5-8815cf2f5170' OR LOWER(title) = 'befa'
+                """)
+                cursor.execute("""
+                    UPDATE courses 
+                    SET visibility = 'shared_demo', is_demo = 1
+                    WHERE id = 'cd781c49-8d52-4a53-835f-a0e003bec7cf' OR LOWER(title) LIKE '%cs229%'
+                """)
 
-            # Seed default curriculum prerequisites
-            canonical_prereqs = [
-                (None, "Gradient Descent", "Supervised Learning"),
-                (None, "Gradient Descent", "Linear Regression"),
-                (None, "Optimization Dynamics", "Gradient Descent"),
-                (None, "Optimization Algorithms", "Optimization Dynamics"),
-                (None, "Neural Network Architectures", "Gradient Descent"),
-                (None, "Neural Networks", "Gradient Descent"),
-                (None, "Generalization & Regularization", "Supervised Learning"),
-            ]
-            for c_id, top, prereq in canonical_prereqs:
-                p_id = str(uuid.uuid4())
-                cursor.execute(
-                    "INSERT OR IGNORE INTO topic_prerequisites (id, course_id, topic_name, prerequisite_topic) VALUES (?, ?, ?, ?)",
-                    (p_id, c_id, top, prereq)
-                )
+                # Seed default curriculum prerequisites
+                canonical_prereqs = [
+                    (None, "Gradient Descent", "Supervised Learning"),
+                    (None, "Gradient Descent", "Linear Regression"),
+                    (None, "Optimization Dynamics", "Gradient Descent"),
+                    (None, "Optimization Algorithms", "Optimization Dynamics"),
+                    (None, "Neural Network Architectures", "Gradient Descent"),
+                    (None, "Neural Networks", "Gradient Descent"),
+                    (None, "Generalization & Regularization", "Supervised Learning"),
+                ]
+                for c_id, top, prereq in canonical_prereqs:
+                    p_id = str(uuid.uuid4())
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO topic_prerequisites (id, course_id, topic_name, prerequisite_topic) VALUES (?, ?, ?, ?)",
+                        (p_id, c_id, top, prereq)
+                    )
 
-            conn.commit()
+                conn.commit()
+            self._initialized = True
+        finally:
+            conn.close()
 
     # ------------------ Users ------------------
     def create_user(self, email: str, password_hash: str, full_name: Optional[str] = None, role: str = "user") -> Dict[str, Any]:

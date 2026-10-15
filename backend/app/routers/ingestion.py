@@ -122,8 +122,16 @@ async def upload_document(
     safe_filename = f"{course_id}_{filename.replace(' ', '_')}"
     save_path = os.path.join(settings.UPLOADS_DIR, safe_filename)
 
-    with open(save_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    try:
+        os.makedirs(settings.UPLOADS_DIR, exist_ok=True)
+        with open(save_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except OSError as e:
+        logger.error(f"Failed to write uploaded file to {save_path}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Storage write error: Unable to save upload on server ({e}). In serverless, ensure temporary storage is writable."
+        )
 
     doc_record = storage.create_document(
         course_id=course_id,

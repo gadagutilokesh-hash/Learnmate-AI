@@ -4,8 +4,29 @@ from typing import List, Optional, Any
 import os
 import tempfile
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
+
+def is_path_in_source_tree(target_path: Optional[str]) -> bool:
+    """Checks whether a given filesystem path is located inside the application source tree."""
+    if not target_path:
+        return False
+    try:
+        backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        project_dir = os.path.dirname(backend_dir)
+        abs_target = os.path.abspath(target_path)
+
+        for root in (backend_dir, project_dir):
+            try:
+                common = os.path.commonpath([abs_target, root])
+                if common == root:
+                    return True
+            except (ValueError, OSError):
+                continue
+        return False
+    except (ValueError, OSError):
+        return False
 
 class Settings(BaseSettings):
     APP_NAME: str = "LearnMate AI Backend"
@@ -98,37 +119,19 @@ class Settings(BaseSettings):
             origins.append("https://learnmate-ai-peach.vercel.app")
         return origins
 
-    @model_validator(mode="after")
-    def resolve_storage_paths(self) -> "Settings":
-        """
-        Dynamically configures storage paths based on environment.
-        In serverless or read-only deployments (such as Vercel / AWS Lambda),
-        default to an ephemeral temporary directory (/tmp) so the application
-        never attempts to create directories or write files in the read-only deployment tree.
-        CRITICAL: Never execute os.makedirs() or disk operations during Settings validation!
-        """
-        if self.DATA_DIR is None:
-            if self.is_serverless:
-                self.DATA_DIR = os.path.join(tempfile.gettempdir(), "learnmate_data")
-            else:
-                self.DATA_DIR = os.path.join(
-                    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                    "data"
-                )
-
-        if self.UPLOADS_DIR is None:
-            if self.is_serverless:
-                self.UPLOADS_DIR = os.path.join(tempfile.gettempdir(), "learnmate_uploads")
-            else:
-                self.UPLOADS_DIR = os.path.join(self.DATA_DIR, "uploads")
-
-        return self
-
     @property
     def is_production(self) -> bool:
         env = (self.ENVIRONMENT or "").lower().strip()
         vercel_env = os.environ.get("VERCEL_ENV", "").lower().strip()
         return env == "production" or vercel_env == "production"
+
+    @property
+    def is_render(self) -> bool:
+        return bool(
+            os.environ.get("RENDER") in ("true", "1")
+            or os.environ.get("RENDER_SERVICE_ID")
+            or os.environ.get("RENDER_INSTANCE_ID")
+        )
 
     @property
     def is_serverless(self) -> bool:
@@ -139,13 +142,72 @@ class Settings(BaseSettings):
             or os.environ.get("IS_SERVERLESS", "").lower() in ("1", "true", "yes")
         )
 
+    @model_validator(mode="after")
+    def resolve_storage_paths(self) -> "Settings":
+        """
+        Dynamically and deterministically configures storage paths based on environment.
+        1. If DATA_DIR is explicitly configured, use it.
+        2. In serverless environments (Vercel / AWS Lambda), default to ephemeral /tmp.
+        3. If a persistent disk is mounted (e.g. /var/data or /data exists), use that mount path.
+        4. Otherwise (local development or container without persistent disk), default to backend/data.
+        CRITICAL: Never execute os.makedirs() or disk operations during Settings validation!
+        """
+        if self.DATA_DIR is not None:
+            self.DATA_DIR = os.path.abspath(os.path.expanduser(self.DATA_DIR))
+        else:
+            if self.is_serverless:
+                self.DATA_DIR = os.path.join(tempfile.gettempdir(), "learnmate_data")
+            elif os.path.isdir("/var/data"):
+                # Render persistent disk mounted at standard /var/data mount path
+                self.DATA_DIR = "/var/data"
+            elif os.path.isdir("/data") and not is_path_in_source_tree("/data"):
+                # Alternative standard persistent disk mount path
+                self.DATA_DIR = "/data"
+            else:
+                # Default to project data directory
+                self.DATA_DIR = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                    "data"
+                )
+
+        if self.UPLOADS_DIR is not None:
+            self.UPLOADS_DIR = os.path.abspath(os.path.expanduser(self.UPLOADS_DIR))
+        else:
+            if self.is_serverless:
+                self.UPLOADS_DIR = os.path.join(tempfile.gettempdir(), "learnmate_uploads")
+            else:
+                self.UPLOADS_DIR = os.path.join(self.DATA_DIR, "uploads")
+
+        return self
+
+    @property
+    def has_persistent_disk(self) -> bool:
+        """True if storage is located on a persistent host outside the source tree (not serverless /tmp)."""
+        if self.is_serverless or not self.DATA_DIR:
+            return False
+        # Ephemeral temp directory is not persistent disk
+        temp_dir = tempfile.gettempdir()
+        try:
+            if os.path.commonpath([os.path.abspath(self.DATA_DIR), os.path.abspath(temp_dir)]) == os.path.abspath(temp_dir):
+                return False
+        except (ValueError, OSError):
+            pass
+        # In production or on Render, persistent disk must reside outside source tree
+        if (self.is_production or self.is_render) and is_path_in_source_tree(self.DATA_DIR):
+            return False
+        return True
+
     @property
     def has_persistent_storage(self) -> bool:
-        return bool(self.DATABASE_URL or (self.SUPABASE_URL and self.SUPABASE_KEY))
+        return bool(
+            self.DATABASE_URL
+            or (self.SUPABASE_URL and self.SUPABASE_KEY)
+            or (self.has_persistent_disk and not self.is_serverless)
+        )
 
     @property
     def storage_mode(self) -> str:
-        if self.has_persistent_storage:
+        if self.DATABASE_URL or (self.SUPABASE_URL and self.SUPABASE_KEY):
             return "supabase"
         if self.is_serverless or self.ALLOW_EPHEMERAL_STORAGE:
             return "local_ephemeral"
@@ -155,15 +217,22 @@ settings = Settings()
 
 def ensure_storage_dirs() -> None:
     """
-    Ensures that data and upload directories exist.
+    Ensures that data and upload directories exist and are writable.
     Must ONLY be invoked at runtime (e.g., during startup/lifespan or explicit request processing),
     and NEVER during module import.
     """
-    try:
-        if settings.DATA_DIR:
-            os.makedirs(settings.DATA_DIR, exist_ok=True)
-        if settings.UPLOADS_DIR:
-            os.makedirs(settings.UPLOADS_DIR, exist_ok=True)
-    except OSError as e:
-        logger.warning(f"Could not create storage directories ({settings.DATA_DIR}, {settings.UPLOADS_DIR}): {e}")
-        raise
+    for dir_path, label in [(settings.DATA_DIR, "Data directory"), (settings.UPLOADS_DIR, "Uploads directory")]:
+        if not dir_path:
+            continue
+        try:
+            os.makedirs(dir_path, exist_ok=True)
+            test_probe = os.path.join(dir_path, f".write_probe_{uuid.uuid4().hex}")
+            with open(test_probe, "w") as f:
+                f.write("probe")
+            os.remove(test_probe)
+        except OSError as e:
+            logger.error(f"Could not create or write to {label} ({dir_path}): {e}")
+            raise RuntimeError(
+                f"{label} '{dir_path}' could not be created or is not writable: {e}. "
+                "If running on Render with a persistent disk, ensure the disk is mounted at the configured path."
+            ) from e

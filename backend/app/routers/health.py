@@ -29,7 +29,7 @@ def get_health():
         gemini_embedding_model=gemini_service.embedding_model_name if is_gemini_cfg else None,
         gemini_live_verified=gemini_service._verified_live,
         supabase_configured=bool(settings.SUPABASE_URL and settings.SUPABASE_KEY),
-        storage_mode="supabase" if (settings.SUPABASE_URL and settings.SUPABASE_KEY) else "local_embedded",
+        storage_mode=settings.storage_mode,
         active_provider=provider_name,
         active_model=provider_model,
         provider_configured=provider_cfg,

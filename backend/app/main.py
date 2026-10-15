@@ -22,11 +22,15 @@ def validate_storage_configuration(cfg=None):
     In a serverless production environment (such as Vercel), local SQLite database files and
     local upload directories are ephemeral (/tmp) and cannot be shared across serverless function instances.
     Persistent learner accounts, courses, embeddings, and assessments require persistent storage.
+
+    In a container production environment (such as Render), persistent disks (mounted e.g. at /var/data)
+    preserve SQLite databases across restarts and redeployments. If no persistent disk is configured,
+    the application logs an explicit warning that SQLite data and uploads will not survive restarts/redeployments.
     """
     s = cfg or settings
     if s.is_production:
-        if s.is_serverless or not s.has_persistent_storage:
-            if not s.ALLOW_EPHEMERAL_STORAGE:
+        if s.is_serverless:
+            if not s.has_persistent_storage and not s.ALLOW_EPHEMERAL_STORAGE:
                 error_msg = (
                     "Production startup aborted: Required persistent storage is not configured.\n"
                     "LearnMate AI currently uses SQLite and local file storage. "
@@ -41,12 +45,31 @@ def validate_storage_configuration(cfg=None):
                 )
                 logger.critical(error_msg)
                 raise RuntimeError(error_msg)
-            else:
+            elif not s.has_persistent_storage and s.ALLOW_EPHEMERAL_STORAGE:
                 logger.warning(
                     "⚠️ RUNNING WITH EPHEMERAL STORAGE IN PRODUCTION/SERVERLESS: "
                     "ALLOW_EPHEMERAL_STORAGE=true is active. SQLite database (%s) and uploads (%s) "
                     "are stored in temporary storage (/tmp). Data WILL NOT persist across serverless instances, "
                     "cold starts, or new deployments. Do not use this for real learner accounts or production persistence.",
+                    s.DATA_DIR,
+                    s.UPLOADS_DIR
+                )
+        else:
+            # Container production (Render, Docker, etc.)
+            if not s.has_persistent_storage:
+                db_target = os.path.join(s.DATA_DIR, "learnmate.db") if s.DATA_DIR else "unknown"
+                logger.warning(
+                    "⚠️ RENDER / CONTAINER PERSISTENCE NOTICE: No persistent disk detected or configured. "
+                    "SQLite database (%s) and uploads (%s) are using container storage. "
+                    "Data and uploaded files will not survive service restarts, redeployments, or instance rebuilds. "
+                    "To persist data across deployments on Render, attach a persistent disk (mounted at /var/data) "
+                    "or set DATA_DIR to your disk mount path, or configure SUPABASE_URL / DATABASE_URL.",
+                    db_target,
+                    s.UPLOADS_DIR
+                )
+            else:
+                logger.info(
+                    "Persistent storage verified for production. Data dir: %s | Uploads dir: %s",
                     s.DATA_DIR,
                     s.UPLOADS_DIR
                 )
@@ -70,7 +93,15 @@ async def lifespan(app: FastAPI):
         if settings.is_production and not settings.ALLOW_EPHEMERAL_STORAGE:
             raise
 
-    # 3. Startup AI Provider Check
+    # 3. Explicitly initialize storage database schema
+    try:
+        storage._init_db()
+    except Exception as e:
+        logger.critical(f"Failed to initialize storage database: {e}")
+        if settings.is_production and not settings.ALLOW_EPHEMERAL_STORAGE:
+            raise
+
+    # 4. Startup AI Provider Check
     from app.core.ai_provider import get_ai_provider
     try:
         provider = get_ai_provider()
